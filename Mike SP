@@ -22,3 +22,40 @@ $$
 
 set tbls = 'tbl1,tbl2,tbl3';
 call  prd_common.utils.test($tbls);
+
+--------------------------------------------------------2nd query---------------------
+/*** TEST TABLE ***/
+    create or replace table PRD_COMMON.UTILS.TABLE_TEST
+    (
+        schema_name string,
+        table_name string,
+        dt date
+    );
+    
+    insert into PRD_COMMON.UTILS.TABLE_TEST (schema_name, table_name, dt)
+    values 
+    ('schema1','tbl_a', '2023-01-01'),
+    ('schema2','tbl_b', '2023-02-01'),
+    ('schema3','tbl_c', '2023-03-01')
+    ;
+/*** UDF ***/
+CREATE OR REPLACE FUNCTION PRD_COMMON.UTILS.TABLE_HWM(table_list string)
+  RETURNS date NOT NULL
+AS
+$$
+    with v as (
+        select 
+            split(value, '.') as v,
+            v[0]::string as schema_name,
+            v[1]::string as table_name
+        from table(FLATTEN(INPUT => split(table_list, ',')))
+    )
+    select max(tt.dt) as max_dt
+    from PRD_COMMON.UTILS.TABLE_TEST tt
+    join v
+    on tt.schema_name = v.schema_name and tt.table_name = v.table_name
+$$
+;
+/*** TEST ***/
+set tbl_list = 'schema1.tbl_a,schema2.tbl_b,schema3.tbl_c';
+select PRD_COMMON.UTILS.TABLE_HWM($tbl_list);
