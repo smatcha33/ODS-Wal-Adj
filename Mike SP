@@ -1,0 +1,24 @@
+create or replace procedure utils.test(table_list string)
+  returns varchar not null
+  language sql
+  execute as caller
+as
+$$
+  declare
+    res resultset default (select value::string as table_name from table(flatten(input => split(:table_list, ',')))); 
+    c1 cursor for res;
+    sql varchar;
+  begin    
+    sql := 'sql: ';
+    open c1;
+    for rec in c1 do
+        sql := sql || 'select * from ' || rec.table_name || '; \n';
+    end for;
+    close c1;
+    return sql;    
+  end;
+$$
+;
+
+set tbls = 'tbl1,tbl2,tbl3';
+call  prd_common.utils.test($tbls);
