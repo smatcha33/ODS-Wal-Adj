@@ -1,0 +1,209 @@
+-----------------------creating a new latency tracker table-----------------------------
+create or replace sequence navwhsprd.whs_bi_v2.JOB_SEQ start with 1 increment by 1;
+create OR REPLACE table navwhsprd.whs_bi_v2.test_latency_track(
+JOB_SEQ_id NUMBER(38,0) NOT NULL DEFAULT navwhsprd.whs_bi_v2.JOB_SEQ.NEXTVAL,
+jobname varchar(1000),
+start_time timestamp_LTZ(9),
+end_time timestamp_LTZ(9)
+
+);
+
+-------------------------------check latency proc-----------------------------------------
+create or replace procedure navwhsprd.whs_bi_v2.LATENCY_PRC()
+RETURNS CHAR
+LANGUAGE SQL
+as
+$$
+DECLARE
+ END_TIME TIMESTAMP;
+ START_TIME TIMESTAMP;
+BEGIN
+
+    CALL navwhsprd.whs_bi_v2.get_end_time_PRC() INTO :END_TIME;
+    SELECT TO_TIMESTAMP(TO_CHAR(MAX(END_TIME),'YYYYMMDDHH24:MI'),'YYYYMMDDHH24:MI') INTO :START_TIME FROM navwhsprd.whs_bi.T_TRACK_LATENCY_ADJ;
+    INSERT INTO navwhsprd.whs_bi_v2.test_latency_track(jobname,start_time,end_time) VALUES('DIRECT_ADJUSTMENT' ,:START_TIME,:END_TIME);
+    IF(:END_TIME IS NULL)
+   
+    THEN      CALL SYSTEM$SEND_EMAIL(
+    'latency_email',
+    'ankanaasitbaran.samanta@sony.com',
+    'Email Alert: Latency check failed.',
+    'No data available for DIRECT_ADJUSTMENT to load, '
+    );
+    ELSE
+        CALL navwhsprd.whs_bi_v2.generate_ods_dir_adj_PRC(:START_TIME,:END_TIME);
+
+END IF;
+END;
+$$;
+
+-----------------------getting the end time using watermark proc -----------------------------------------
+
+create or replace procedure navwhsprd.whs_bi_v2.get_end_time_PRC()
+RETURNS TIMESTAMP
+LANGUAGE SQL
+as
+$$
+DECLARE
+    END_TIME TIMESTAMP;
+BEGIN
+  SELECT TO_TIMESTAMP(TO_CHAR(END_TIME,'YYYYMMDDHH24:MI'),'YYYYMMDDHH24:MI') END_TIME INTO :END_TIME from
+(
+  SELECT LEAST(WATERMARK, CASE WHEN 0.000000000000000 = 0 THEN SYSDATE() ELSE DATEADD(minute ,0.000000000000000, to_timestamp(to_char((select max(END_TIME) from whs_bi.T_TRACK_LATENCY_ADJ WHERE JOB_NAME='DIRECT_ADJUSTMENT'),'YYYYMMDDHH24:MI'),'YYYYMMDDHH24:MI')) END) END_TIME
+  FROM
+  (
+     SELECT MIN(TO_TIMESTAMP(TO_CHAR(WATERMARK,'YYYYMMDDHH24:MI'),'YYYYMMDDHH24:MI')) WATERMARK FROM NP_SCECOMM.HEARTBEAT WHERE TABLENAME IN
+      ('TRANSACTION','LEDGER','CHARGEBACK','CHARGE_REFUND','TRANSACTION_DRVNG_ST')
+  )
+)
+WHERE END_TIME > to_timestamp(to_char((select max(END_TIME) from whs_bi.T_TRACK_LATENCY_ADJ WHERE JOB_NAME='DIRECT_ADJUSTMENT'),'YYYYMMDDHH24:MI'),'YYYYMMDDHH24:MI');
+
+    RETURN END_TIME;
+END;
+    
+$$
+;
+
+------------------------------------for email notifications--------------------------------------------
+   CREATE NOTIFICATION INTEGRATION latency_email
+    TYPE=EMAIL
+    ENABLED=TRUE
+    ALLOWED_RECIPIENTS=('ankanaasitbaran.samanta@sony.com');
+drop INTEGRATION latency_email;
+GRANT USAGE ON INTEGRATION latency_email TO ROLE PSN-NAVPRODSF-DPE-ADM;
+
+    CALL SYSTEM$SEND_EMAIL(
+    'latency_email',
+    'ankanaasitbaran.samanta@sony.com',
+    'Email Alert: Latency check failed.',
+    'No data available for DIRECT_ADJUSTMENT to load, '
+);
+
+
+
+
+
+--------------------------------created a new test target table------------------------------------------
+
+CREATE  OR REPLACE  TABLE NAVWHSPRD.WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST LIKE NAVWHSPRD.WHS_BI_V2.ODS_DIRECT_ADJUSTMENT;
+
+-------------------------------dropping not null constraint for now for columns fed by informatica--------------------------------
+
+ALTER TABLE WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST ALTER COLUMN ETL_CREATED_DATE DROP NOT NULL;
+ALTER TABLE WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST ALTER COLUMN ETL_UPDATED_DATE DROP NOT NULL;
+
+-------------------------------------CALLING NEXT SESSION(Combines both the sessions of ODS_DIRECT_ADJUSTMENT workflow--------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE navwhsprd.whs_bi_v2.generate_ods_dir_adj_PRC(start_time TIMESTAMP,end_time TIMESTAMP)
+RETURNS VARCHAR
+LANGUAGE SQL
+as
+$$
+BEGIN
+INSERT INTO NAVWHSPRD.WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST WITH T_DIRECT_ADJ_TRANS_SF_V2 AS (select TRANSACTION_ID,             
+TO_TIMESTAMP(TO_CHAR(TRANSACTION_DATE, 'MMDDYYYY HH24:MI:SS.FF6'),'MMDDYYYY HH24:MI:SS.FF6')     TRANSACTION_DATE  ,     
+ACCOUNT_ID          ,    
+TRANSACTION_TYPE        ,   
+LEDGER_ID                ,  
+PLATFORM_ID               , 
+DEVICE_ID                  ,
+IP_ADDRESS                 ,
+ZIPCODE                    ,
+TO_TIMESTAMP(TO_CHAR(GG_LAST_DML, 'MMDDYYYY HH24:MI:SS.FF6'),'MMDDYYYY HH24:MI:SS.FF6') GG_LAST_DML,
+TO_TIMESTAMP(TO_CHAR(GG_LAST_TIME, 'MMDDYYYY HH24:MI:SS.FF6'),'MMDDYYYY HH24:MI:SS.FF6') GG_LAST_TIME,
+LTIP_FLAG                  ,
+TRANSACTION_VERSION        ,
+ROOT_DRIVING_TRANSACTION_ID
+FROM NP_SCECOMM.TRANSACTION
+WHERE TRANSACTION_VERSION < 2
+and transaction_date >:START_TIME
+and transaction_date <=:END_TIME 
+UNION
+select t.TRANSACTION_ID,       
+TO_TIMESTAMP(TO_CHAR(t.TRANSACTION_DATE, 'MMDDYYYY HH24:MI:SS.FF6'),'MMDDYYYY HH24:MI:SS.FF6') TRANSACTION_DATE,    
+t.ACCOUNT_ID           ,    
+t.TRANSACTION_TYPE        ,   
+t.LEDGER_ID                ,  
+t.PLATFORM_ID               , 
+t.DEVICE_ID                  ,
+t.IP_ADDRESS                 ,
+t.ZIPCODE                    ,
+TO_TIMESTAMP(TO_CHAR(t.GG_LAST_DML, 'MMDDYYYY HH24:MI:SS.FF6'),'MMDDYYYY HH24:MI:SS.FF6') GG_LAST_DML,               
+TO_TIMESTAMP(TO_CHAR(t.GG_LAST_TIME, 'MMDDYYYY HH24:MI:SS.FF6'),'MMDDYYYY HH24:MI:SS.FF6') GG_LAST_TIME,              
+t.LTIP_FLAG                  ,
+t.TRANSACTION_VERSION        ,
+t.ROOT_DRIVING_TRANSACTION_ID
+FROM NP_SCECOMM.TRANSACTION_DRVNG_ST st,NP_SCECOMM.TRANSACTION t
+WHERE t.ROOT_DRIVING_TRANSACTION_ID= st.TRANSACTION_ID AND st.state_type_id =1
+and t.TRANSACTION_VERSION=2
+and t.transaction_date >:START_TIME
+and t.transaction_date <= :END_TIME
+and st.modify_date <= :END_TIME)
+
+SELECT
+    T1.TRANSACTION_ID TRANSACTION_ID,
+    T.TRANSACTION_ID ASSOCIATED_TRANSACTION_ID,
+    TO_TIMESTAMP(TO_CHAR(T1.TRANSACTION_DATE, 'MMDDYYYY HH24:MI:SS.FF6'), 'MMDDYYYY HH24:MI:SS.FF6') AS TRANSACTION_DATE,
+    T1.ACCOUNT_ID        AS T_ACCOUNT_ID,
+    T1.TRANSACTION_TYPE,
+    T1.LEDGER_ID         AS T_LEDGER_ID,
+    T1.PLATFORM_ID       AS T_PLATFORM_ID,
+    T1.DEVICE_ID         AS T_DEVICE_ID,
+    T1.IP_ADDRESS        AS T_IP_ADDRESS,
+    T1.ZIPCODE           AS T_ZIPCODE,
+    L.LEDGER_ID,
+    L.TRANSACTION_ID       AS L_TRANSACTION_ID,
+    L.OWNER                AS L_OWNER,
+    L.ACTOR                AS L_ACTOR,
+    TO_TIMESTAMP(TO_CHAR(L.CREATION_DATE, 'MMDDYYYY HH24:MI:SS.FF6'), 'MMDDYYYY HH24:MI:SS.FF6') AS L_CREATION_DATE,
+    L.LEDGER_TYPE          AS L_LEDGER_TYPE,
+    L.LEDGER_STATUS        AS L_LEDGER_STATUS,
+    L.CURRENCY_CODE        AS L_CURRENCY_CODE,
+    L.ORDER_TOTAL          AS L_ORDER_TOTAL,
+    L.PAYMENT_TOTAL        AS L_PAYMENT_TOTAL,
+    L.BALANCE              AS L_BALANCE,
+    L.COUNTRY_CODE         AS L_COUNTRY_CODE,
+    TO_TIMESTAMP(TO_CHAR(L.MODIFY_DATE, 'MMDDYYYY HH24:MI:SS.FF6'), 'MMDDYYYY HH24:MI:SS.FF6') AS L_MODIFY_DATE,
+    CR.CHARGE_REFUND_ID,
+    CR.CHARGE_PAYMENT_ID   CR_CHARGE_PAYMENT_ID,
+    CR.REFUND_REASON       CR_REFUND_REASON,
+    CR.REFUND_AMOUNT       CR_REFUND_AMOUNT,
+    CB.CHARGEBACK_ID,
+    CB.CHARGE_PAYMENT_ID,
+    CB.CHARGEBACK_AMOUNT,
+    -1 as CHARGEBACK_NOTIFICATION_ID,  ---Chargeback id has hardcoded -1    
+    null as ETL_CREATED_DATE,
+    null AS ETL_UPDATED_DATE,
+    null as WTL_LOAD_ID,
+
+    C.REGION               AS REGION
+    
+FROM
+       NP_SCECOMM.TRANSACTION T       
+       INNER JOIN T_DIRECT_ADJ_TRANS_SF_V2 T1 ON T1.LEDGER_ID = T.LEDGER_ID AND T1.TRANSACTION_TYPE IN (10,11,12,23)
+       INNER JOIN NP_SCECOMM.LEDGER L ON T.LEDGER_ID=L.LEDGER_ID 
+               AND L.TENANT_ID =1  -- Vega Changes 
+       INNER JOIN NP_SCECOMM.COUNTRY C     ON L.COUNTRY_CODE = C.COUNTRY_CODE 
+       LEFT OUTER JOIN NP_SCECOMM.CHARGEBACK CB ON T1.TRANSACTION_ID = CB.CHARGEBACK_TRANSACTION_ID
+       LEFT OUTER JOIN NP_SCECOMM.CHARGE_REFUND CR ON T1.TRANSACTION_ID = CR.REFUND_TRANSACTION_ID      
+       WHERE T.TRANSACTION_TYPE IN (2,3)
+       AND T1.TRANSACTION_DATE > :START_TIME
+       AND T1.TRANSACTION_DATE <=  :END_TIME
+       AND NOT EXISTS 
+          (SELECT 1 FROM WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST ODA
+           WHERE ODA.TRANSACTION_ID = T1.TRANSACTION_ID
+           AND ODA.TRANSACTION_DATE > :START_TIME - INTERVAL '1 day'
+           );
+
+RETURN 'SUCCESS';
+END;
+$$;
+
+-------------------------------Check results---------------------------------------
+CALL navwhsprd.whs_bi_v2.LATENCY_PRC()
+
+select * from navwhsprd.whs_bi_v2.test_latency_track;
+
+SELECT COUNT(*) FROM NAVWHSPRD.WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST;
+
+SELECT * FROM NAVWHSPRD.WHS_BI_V2.ODS_DIRECT_ADJUSTMENT_TEST;
